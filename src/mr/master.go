@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -35,16 +36,23 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 func (m *Master) RPCHandler(req *Req, res *Res) error {
+	res.Header = OK
 	switch req.Header {
 	case RequestTask:
 		m.handleRegisterTask(req, res)
+		break
 
 	case FinishTask:
 		m.handleFinishTask(req, res)
-		m.handleRegisterTask(req, res)
+		break
 
 	case RegisterWorker:
 		m.handleRegisterWorker(req, res)
+		break
+
+	default:
+		res.Header = ErrInvalidReq
+		break
 	}
 	return nil
 }
@@ -54,23 +62,35 @@ func (m *Master) handleRegisterWorker(req *Req, res *Res) error {
 	defer m.mu.Unlock()
 	m.WorkerNum++
 	res.WorkerID = m.WorkerNum
+	res.NReduce = m.NReduce
 	return nil
 }
 
 func (m *Master) handleRegisterTask(req *Req, res *Res) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	log.Printf("handleRegisterTask - %v", req.WorkerID)
+
 	var taskID int
 	select {
 	case overtimeTaskID := <-m.Timers:
 		taskID = overtimeTaskID
+		log.Printf("overTime!ID - %v", overtimeTaskID)
+		break
 	default:
-		if m.TaskEndNum == len(m.Tasks) {
+		if m.TaskInitNum == len(m.Tasks)-1 {
+			fmt.Printf("No new task num:%v\n", m.TaskEndNum)
 			res.Header = NoNewTask
+			return nil
+		} else if m.TaskEndNum == len(m.Tasks)-1 {
+			fmt.Printf("All task end num:%v\n", m.TaskEndNum)
+			res.Header = AllTaskFinished
 			return nil
 		}
 		m.TaskInitNum++
 		taskID = m.TaskInitNum
+		log.Printf("default assign - %v", taskID)
+		break
 	}
 	task, _ := m.assign(taskID, req.WorkerID, res)
 	go m.taskTimer(task)
@@ -78,6 +98,7 @@ func (m *Master) handleRegisterTask(req *Req, res *Res) error {
 }
 
 func (m *Master) handleFinishTask(req *Req, res *Res) error {
+	log.Printf("handleFinishTask - %v", m.Tasks[req.TaskID].workerID)
 	if m.Tasks[req.TaskID].workerID != FinishedWorker {
 		m.mu.Lock()
 		defer m.mu.Unlock()
@@ -91,6 +112,9 @@ func (m *Master) assign(taskID int, workerID int, res *Res) (*Task, error) {
 	res.Header = OK
 	assignedTask := m.Tasks[taskID]
 	assignedTask.ID = taskID
+	assignedTask.workerID = workerID
+	log.Printf("Assign - job %v to %v", assignedTask.ID, assignedTask.workerID)
+
 	if assignedTask.workerID != NotAssignedWorker && assignedTask.workerID != workerID {
 		//TODO: handle evit a Task from old worker
 	}
@@ -100,7 +124,7 @@ func (m *Master) assign(taskID int, workerID int, res *Res) (*Task, error) {
 }
 
 func (m *Master) taskTimer(t *Task) error {
-	time.Sleep(10 * time.Millisecond)
+	time.Sleep(20 * time.Second)
 	if t.workerID != FinishedWorker {
 		m.Timers <- t.ID
 	}
@@ -131,7 +155,7 @@ func (m *Master) Done() bool {
 	// Your code here.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.TaskEndNum == len(m.Tasks)
+	return m.TaskEndNum == len(m.Tasks)-1
 }
 
 //
@@ -150,6 +174,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 			file:     files[i],
 			workerID: NotAssignedWorker,
 		}
+		fmt.Printf("load file names%v\n", files[i])
 	}
 
 	m := Master{
@@ -157,7 +182,7 @@ func MakeMaster(files []string, nReduce int) *Master {
 		Files:       files,
 		NReduce:     nReduce,
 		Tasks:       tasks,
-		TaskInitNum: 1,
+		TaskInitNum: -1,
 		Timers:      make(chan int, 10),
 		WorkerNum:   0,
 	}

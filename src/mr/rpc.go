@@ -41,6 +41,7 @@ type (
 		WorkerID int
 		FileName string
 		TaskID   int
+		NReduce  int
 	}
 )
 

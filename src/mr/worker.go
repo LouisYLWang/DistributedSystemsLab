@@ -8,7 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
-	"sort"
+	"time"
 )
 
 //
@@ -19,6 +19,7 @@ type (
 		workerID int
 		mapf     func(string, string) []KeyValue
 		reducef  func(string, []string) string
+		nReduce  int
 	}
 
 	KeyValue struct {
@@ -54,21 +55,30 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// uncomment to send the Example RPC to the master.
 	// CallExample()
-
 	w := Workerman{
-		mapf:    mapf,
-		reducef: reducef,
+		mapf:     mapf,
+		reducef:  reducef,
+		workerID: -1,
 	}
 	res := w.request(RegisterWorker)
 	w.workerID = res.WorkerID
-
+	w.nReduce = res.NReduce
 	for {
-		res = w.request(RegisterWorker)
-		if res.Header == OK {
+		res = w.request(RequestTask)
+		switch res.Header {
+		case OK:
+			log.Printf("worker %d received Task %d on file %s", w.workerID, res.TaskID, res.FileName)
 			w.performMapTask(res)
-		} else if res.Header == NoNewTask {
+			w.request(FinishTask, res.TaskID)
+			break
+		case NoNewTask:
+			log.Printf("no new Task now yet, wait")
+			time.Sleep(10 * time.Second)
+			break
+		case AllTaskFinished:
 			log.Printf("all Task has been assigned")
 			return
+
 		}
 	}
 }
@@ -77,7 +87,7 @@ func Worker(mapf func(string, string) []KeyValue,
 func (w *Workerman) request(reqHeader string, args ...int) *Res {
 	req := Req{
 		Header:   reqHeader,
-		WorkerID: -1,
+		WorkerID: w.workerID,
 		FileName: "",
 		TaskID:   NotAssignedWorker,
 	}
@@ -106,18 +116,25 @@ func (w *Workerman) performMapTask(res *Res) {
 	}
 	file.Close()
 	kva := w.mapf(fileName, string(content))
-	sort.Sort(ByKey(kva))
-
-	intrmedFileName := fmt.Sprintf("mr-%d", taskID)
-	intrmedFile, _ := os.Create(intrmedFileName)
-	enc := json.NewEncoder(intrmedFile)
+	reduces := make([][]KeyValue, w.nReduce)
 	for _, kv := range kva {
-		err := enc.Encode(&kv)
-		if err != nil {
-			log.Fatalf("error writing %s", intrmedFileName)
-		}
+		i := ihash(kv.Key) % w.nReduce
+		reduces[i] = append(reduces[i], kv)
 	}
-	log.Printf("worker %d finish Task %d on file %s", w.workerID, taskID, fileName)
+
+	for i, kvs := range reduces {
+		intrmedFileName := fmt.Sprintf("mr-%d-%d", taskID, i)
+		intrmedFile, _ := os.Create(intrmedFileName)
+		enc := json.NewEncoder(intrmedFile)
+		for _, kv := range kvs {
+			err := enc.Encode(&kv)
+			if err != nil {
+				log.Fatalf("error writing %s", intrmedFileName)
+			}
+		}
+		intrmedFile.Close()
+	}
+	log.Printf("worker %d finish Task %d", w.workerID, taskID)
 }
 
 //
@@ -160,7 +177,6 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 	if err == nil {
 		return true
 	}
-
 	fmt.Println(err)
 	return false
 }
