@@ -1,7 +1,10 @@
 package mr
 
 const (
-	OK              = "OK"
+	OK     = "OK"
+	Map    = "MAP"
+	Reduce = "RED"
+
 	NoNewTask       = "NoNewTask"
 	AllTaskFinished = "AllTaskFinished"
 

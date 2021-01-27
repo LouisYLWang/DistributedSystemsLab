@@ -20,6 +20,7 @@ type (
 		mapf     func(string, string) []KeyValue
 		reducef  func(string, []string) string
 		nReduce  int
+		nMap     int
 	}
 
 	KeyValue struct {
@@ -60,20 +61,28 @@ func Worker(mapf func(string, string) []KeyValue,
 		reducef:  reducef,
 		workerID: -1,
 	}
-	res := w.request(RegisterWorker)
+	res := w.request(RegisterWorker, NotAssignedWorker)
 	w.workerID = res.WorkerID
+	w.nMap = res.NMap
 	w.nReduce = res.NReduce
 	for {
-		res = w.request(RequestTask)
+		res = w.request(RequestTask, res.TaskID)
 		switch res.Header {
-		case OK:
-			log.Printf("worker %d received Task %d on file %s", w.workerID, res.TaskID, res.FileName)
+		case Map:
+			log.Printf("worker %d received Map Task %d on file %s", w.workerID, res.TaskID, res.FileName)
 			w.performMapTask(res)
 			w.request(FinishTask, res.TaskID)
 			break
+
+		case Reduce:
+			log.Printf("worker %d received Reduce Task %d on file %s", w.workerID, res.TaskID, res.FileName)
+			w.performReduceTask(res)
+			w.request(FinishTask, res.TaskID)
+			break
+
 		case NoNewTask:
 			log.Printf("no new Task now yet, wait")
-			time.Sleep(10 * time.Second)
+			time.Sleep(1 * time.Second)
 			break
 		case AllTaskFinished:
 			log.Printf("all Task has been assigned")
@@ -84,7 +93,7 @@ func Worker(mapf func(string, string) []KeyValue,
 }
 
 // register Task or worker server
-func (w *Workerman) request(reqHeader string, args ...int) *Res {
+func (w *Workerman) request(reqHeader string, taskID int) *Res {
 	req := Req{
 		Header:   reqHeader,
 		WorkerID: w.workerID,
@@ -92,10 +101,7 @@ func (w *Workerman) request(reqHeader string, args ...int) *Res {
 		TaskID:   NotAssignedWorker,
 	}
 
-	switch reqHeader {
-	case FinishTask:
-		req.TaskID = args[0]
-	}
+	req.TaskID = taskID
 	res := Res{}
 	if ok := call("Master.RPCHandler", &req, &res); !ok {
 		log.Fatal("req fail")
@@ -134,7 +140,38 @@ func (w *Workerman) performMapTask(res *Res) {
 		}
 		intrmedFile.Close()
 	}
-	log.Printf("worker %d finish Task %d", w.workerID, taskID)
+	log.Printf("worker %d finish map Task %d", w.workerID, taskID)
+}
+
+func (w *Workerman) performReduceTask(res *Res) {
+	reduceMap := make(map[string][]string)
+	for i := 0; i < w.nMap; i++ {
+		intrmedFile, err := os.Open(fmt.Sprintf("mr-%d-%d", i, res.TaskID))
+		if err != nil {
+			log.Fatalf("cannot open mr-%d-%d: %v ", i, res.TaskID, err)
+		}
+		dec := json.NewDecoder(intrmedFile)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			if _, existed := reduceMap[kv.Key]; !existed {
+				reduceMap[kv.Key] = make([]string, 0)
+			}
+			reduceMap[kv.Key] = append(reduceMap[kv.Key], kv.Value)
+		}
+	}
+
+	// exportString := ""
+	exportFileName := fmt.Sprintf("mr-out-%d", res.TaskID)
+	exportFile, _ := os.Create(exportFileName)
+	for key, val := range reduceMap {
+		// exportString = exportString + fmt.Sprintf("%v %v\n", key, w.reducef(key, val))
+		fmt.Fprintf(exportFile, "%v %v\n", key, w.reducef(key, val))
+	}
+	exportFile.Close()
+	log.Printf("worker %d finish reduce Task %d", w.workerID, res.TaskID)
 }
 
 //

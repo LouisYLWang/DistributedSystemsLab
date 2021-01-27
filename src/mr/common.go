@@ -2,9 +2,10 @@ package mr
 
 type (
 	Task struct {
-		ID   int
-		file string
+		ID       int
+		file     string
 		workerID int
+		taskType int
 	}
 
 	File string

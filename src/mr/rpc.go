@@ -42,6 +42,7 @@ type (
 		FileName string
 		TaskID   int
 		NReduce  int
+		NMap     int
 	}
 )
 

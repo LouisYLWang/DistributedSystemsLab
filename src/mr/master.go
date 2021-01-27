@@ -16,11 +16,13 @@ type Master struct {
 	mu          sync.Mutex
 	Files       []string
 	NReduce     int
+	NMap        int
 	Tasks       []*Task
 	TaskInitNum int
 	TaskEndNum  int
 	Timers      chan int
 	WorkerNum   int
+	Phase       string
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -36,7 +38,6 @@ func (m *Master) Example(args *ExampleArgs, reply *ExampleReply) error {
 }
 
 func (m *Master) RPCHandler(req *Req, res *Res) error {
-	res.Header = OK
 	switch req.Header {
 	case RequestTask:
 		m.handleRegisterTask(req, res)
@@ -62,15 +63,16 @@ func (m *Master) handleRegisterWorker(req *Req, res *Res) error {
 	defer m.mu.Unlock()
 	m.WorkerNum++
 	res.WorkerID = m.WorkerNum
+	res.TaskID = NotAssignedWorker
 	res.NReduce = m.NReduce
+	res.NMap = m.NMap
 	return nil
 }
 
 func (m *Master) handleRegisterTask(req *Req, res *Res) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	log.Printf("handleRegisterTask - %v", req.WorkerID)
-
+	log.Printf("handleRegisterTask - worker %v - task %v", req.WorkerID, req.TaskID)
 	var taskID int
 	select {
 	case overtimeTaskID := <-m.Timers:
@@ -78,13 +80,16 @@ func (m *Master) handleRegisterTask(req *Req, res *Res) error {
 		log.Printf("overTime!ID - %v", overtimeTaskID)
 		break
 	default:
-		if m.TaskInitNum == len(m.Tasks)-1 {
+		if m.TaskEndNum == len(m.Tasks) {
+			if m.Phase == Reduce {
+				fmt.Printf("All task end num:%v\n", m.TaskEndNum)
+				res.Header = AllTaskFinished
+				return nil
+			}
+			m.initReduce()
+		} else if m.TaskInitNum == len(m.Tasks)-1 {
 			fmt.Printf("No new task num:%v\n", m.TaskEndNum)
 			res.Header = NoNewTask
-			return nil
-		} else if m.TaskEndNum == len(m.Tasks)-1 {
-			fmt.Printf("All task end num:%v\n", m.TaskEndNum)
-			res.Header = AllTaskFinished
 			return nil
 		}
 		m.TaskInitNum++
@@ -92,7 +97,8 @@ func (m *Master) handleRegisterTask(req *Req, res *Res) error {
 		log.Printf("default assign - %v", taskID)
 		break
 	}
-	task, _ := m.assign(taskID, req.WorkerID, res)
+	res.Header = m.Phase
+	task, _ := m.assign(taskID, req.WorkerID, res, m.Phase)
 	go m.taskTimer(task)
 	return nil
 }
@@ -108,12 +114,13 @@ func (m *Master) handleFinishTask(req *Req, res *Res) error {
 	return nil
 }
 
-func (m *Master) assign(taskID int, workerID int, res *Res) (*Task, error) {
-	res.Header = OK
+func (m *Master) assign(taskID int, workerID int, res *Res, taskType string) (*Task, error) {
+	res.Header = taskType
 	assignedTask := m.Tasks[taskID]
 	assignedTask.ID = taskID
 	assignedTask.workerID = workerID
 	log.Printf("Assign - job %v to %v", assignedTask.ID, assignedTask.workerID)
+	log.Printf("file %v", assignedTask.file)
 
 	if assignedTask.workerID != NotAssignedWorker && assignedTask.workerID != workerID {
 		//TODO: handle evit a Task from old worker
@@ -129,6 +136,26 @@ func (m *Master) taskTimer(t *Task) error {
 		m.Timers <- t.ID
 	}
 	return nil
+}
+
+func (m *Master) initReduce() {
+	m.Phase = Reduce
+	m.TaskEndNum = 0
+	m.TaskInitNum = -1
+
+	var (
+		tasks = make([]*Task, m.NReduce)
+	)
+	m.Tasks = tasks
+
+	for i := 0; i < m.NReduce; i++ {
+		m.Tasks[i] = &Task{
+			ID:       i,
+			file:     fmt.Sprintf("mr-*-%d", i),
+			workerID: NotAssignedWorker,
+		}
+		fmt.Printf("load reduce task%v\n", tasks[i].file)
+	}
 }
 
 //
@@ -155,7 +182,7 @@ func (m *Master) Done() bool {
 	// Your code here.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.TaskEndNum == len(m.Tasks)-1
+	return m.Phase == Reduce && m.TaskEndNum == len(m.Tasks)-1
 }
 
 //
@@ -181,10 +208,12 @@ func MakeMaster(files []string, nReduce int) *Master {
 		mu:          sync.Mutex{},
 		Files:       files,
 		NReduce:     nReduce,
+		NMap:        len(tasks),
 		Tasks:       tasks,
 		TaskInitNum: -1,
-		Timers:      make(chan int, 10),
+		Timers:      make(chan int, nReduce),
 		WorkerNum:   0,
+		Phase:       Map,
 	}
 
 	// Your code here.
